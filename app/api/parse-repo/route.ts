@@ -1,41 +1,71 @@
-"use server"
-import { NextApiRequest, NextApiResponse } from 'next';
-import { Octokit } from '@octokit/rest'; 
-import axios from 'axios'; 
-import { pc, index } from '../../../lib/pineconeClient';  // Use the imported 'index'
 import { NextRequest, NextResponse } from 'next/server';
+import { Octokit } from '@octokit/rest';
+import { Pinecone } from '@pinecone-database/pinecone';
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 
-const model = 'text-embedding-3-large';
+const embeddings = new GoogleGenerativeAIEmbeddings({
+  modelName: "embedding-001",
+  apiKey: process.env.NEXT_PUBLIC_GOOGLE_GEMINI_API_KEY,
+});
 
+const pinecone = new Pinecone({
+  apiKey: process.env.PINECONE_API_KEY!,
+});
+
+const index = pinecone.Index(process.env.PINECONE_INDEX_NAME!);
+
+// Function to chunk text
+function chunkText(text: string, maxChunkSize: number = 8000): string[] {
+  const chunks: string[] = [];
+  let currentChunk = '';
+
+  text.split('\n').forEach(line => {
+    if (currentChunk.length + line.length > maxChunkSize) {
+      chunks.push(currentChunk);
+      currentChunk = '';
+    }
+    currentChunk += line + '\n';
+  });
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+// Handle repository processing and embedding upsert
 export async function POST(req: NextRequest) {
   try {
-    // Parse the request body
     const body = await req.json();
     const { username, repo } = body;
 
-    if (!username) {
-      return NextResponse.json({ error: 'Username is required' }, { status: 400 });
-    }
-    if (!repo) {
-      return NextResponse.json({ error: 'Repository name is required' }, { status: 400 });
+    if (!username || !repo) {
+      return NextResponse.json(
+        { error: 'Username and repository name are required' },
+        { status: 400 }
+      );
     }
 
-    // Initialize Octokit
+    console.log(`Processing repository: ${username}/${repo}`);
+
+    // Initialize Octokit for GitHub API calls
     const octokit = new Octokit({
       auth: process.env.NEXT_PUBLIC_GITHUB_TOKEN,
     });
 
-    // Fetch the contents of the repository root
+    // Fetch repository content
     const repoContents = await octokit.repos.getContent({
       owner: username,
       repo,
-      path: '', // Fetch the contents of the root directory
+      path: '',
     });
 
     const files = Array.isArray(repoContents.data) ? repoContents.data : [repoContents.data];
-    const fileData: Array<{ id: string; text: string }> = [];
+    const fileData: Array<{ id: string; text: string; chunks: string[] }> = [];
 
-    // Process each file
+    console.log(`Found ${files.length} files in the repository`);
+
     for (const file of files) {
       if (file.type === 'file') {
         const fileContent = await octokit.repos.getContent({
@@ -46,78 +76,92 @@ export async function POST(req: NextRequest) {
         });
 
         if (typeof fileContent.data === 'string') {
+          const chunks = chunkText(fileContent.data); // Ensure chunkText works correctly
           fileData.push({
             id: file.sha,
             text: fileContent.data,
+            chunks: chunks,
           });
-        } else {
-          console.warn(`File ${file.path} content is not a string.`);
+          console.log(`Processed file: ${file.path}. Chunks: ${chunks.length}`);
         }
       }
     }
 
-    // Generate embeddings
-    const texts: string[] = fileData.map(d => d.text);
-    const embeddings = await pc.inference.embed(
-      model,
-      texts,
-      { inputType: 'passage', truncate: 'END' }
+    const allChunks = fileData.flatMap((file) => file.chunks);
+    console.log(`Total chunks to be embedded: ${allChunks.length}`);
+
+    // Add log to verify the contents of the first chunk
+    console.log(`First chunk of data: ${allChunks[0]}`);
+
+    console.log('Starting embedding generation...');
+
+    const embeddingResults = await Promise.all(
+      allChunks.map(async (chunk, index) => {
+        if (!chunk || chunk.trim().length === 0) {
+          console.warn(`Chunk ${index} is empty or invalid, skipping embedding.`);
+          return null;
+        }
+        try {
+          return await embeddings.embedQuery(chunk); // No second argument
+        } catch (embeddingError) {
+          console.error(`Failed to generate embedding for chunk ${index}:`, embeddingError);
+          return null; // Handle embedding failure
+        }
+      })
     );
 
-    const vectors = fileData.map((d, i) => ({
-      id: d.id,
-      values: embeddings[i]?.values || [], // Ensure these match the index dimension
-      metadata: { text: d.text, path: d.id },
-    }));
+    // Filter out any null/empty embeddings
+    const validEmbeddings = embeddingResults.filter((embedding) => embedding && embedding.length > 0);
 
-    // Store vectors in Pinecone
-    await index.namespace('ns1').upsert(vectors);
+    if (!validEmbeddings || validEmbeddings.length === 0) {
+      throw new Error('Failed to generate any valid embeddings');
+    }
 
-    return NextResponse.json({ message: 'Repository contents processed and embeddings stored!' });
+    console.log(`Valid embeddings generated: ${validEmbeddings.length}`);
+
+    const vectors = fileData.flatMap((file, fileIndex) =>
+      file.chunks.map((chunk, chunkIndex) => {
+        const embedding = embeddingResults[fileIndex * file.chunks.length + chunkIndex];
+
+        if (!embedding || embedding.length === 0) {
+          console.warn(`Embedding is empty for chunk ${chunkIndex}, skipping this vector.`);
+          return null;
+        }
+
+        return {
+          id: `${file.id}-chunk-${chunkIndex}`,
+          values: embedding,
+          metadata: {
+            text: chunk,
+            path: file.id,
+            chunkIndex: chunkIndex,
+            totalChunks: file.chunks.length,
+          },
+        };
+      })
+    );
+
+    // Filter out null vectors (i.e., chunks without embeddings)
+    const validVectors = vectors.filter((vector) => vector !== null);
+
+    if (validVectors.length === 0) {
+      throw new Error('No valid vectors to upsert into Pinecone.');
+    }
+
+    console.log(`Valid vectors prepared for Pinecone: ${validVectors.length}`);
+
+    console.log('Starting upsert to Pinecone...');
+    await index.upsert(validVectors);
+    console.log('Upsert to Pinecone completed');
+
+    return NextResponse.json({
+      message: 'Repository contents processed and embeddings stored!',
+    });
   } catch (error) {
     console.error('Error processing repository:', error);
-    return NextResponse.json({ error: 'Failed to process repository. Please check the provided parameters and try again.' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Failed to process repository. Please check the provided parameters and try again.' },
+      { status: 500 }
+    );
   }
 }
-
-export const searchSimilarVectors = async () => {
-  try {
-    // Define your query vector and filter
-    const queryVector = [0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]; // Replace with actual vector
-    const query = await pc.inference.embed(
-      model,
-      ['Tell me about this code'],  // Replace with actual query text
-      { inputType: 'query' }
-    );
-
-    if (query && query[0]?.values) {
-      const queryResponse = await index.namespace('ns1').query({
-   vector: query[0].values,
-    topK: 1,
-    includeMetadata: true,
-    filter: {
-        "genre": {"$eq": "documentary"}
-    }
-});
-
-      console.log('Query Response:', queryResponse);
-
-      return queryResponse;
-    } else {
-      console.error('Embedding generation failed or returned undefined values.');
-      return null;
-    }
-  } catch (error) {
-    console.error('Error querying similar vectors:', error);
-  }
-};
-
-// Example usage for the query function
-(async () => {
-  const result = await searchSimilarVectors();
-  if (result) {
-    console.log(result);
-  } else {
-    console.log('No results returned.');
-  }
-})();

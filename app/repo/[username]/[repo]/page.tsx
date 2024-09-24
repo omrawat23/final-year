@@ -1,109 +1,50 @@
-"use client";
+'use client'
 
-import Button from '@/components/ui/button';
-import { useParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
-import { FaFolder, FaFile } from 'react-icons/fa';
+import { useParams, useRouter } from 'next/navigation'
+import { useState } from 'react'
+import { FolderIcon, FileIcon, ArrowLeftIcon, Loader2Icon, GithubIcon } from 'lucide-react'
+import { useGitHubData } from '@/hooks/useGithubData'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
-interface RepoContent {
-  name: string;
-  type: string;
-  path: string;
-  sha: string;
-}
+export default function RepoPage() {
+  const params = useParams()
+  const username = Array.isArray(params?.username) ? params?.username[0] : params?.username
+  const repo = Array.isArray(params?.repo) ? params?.repo[0] : params?.repo
+  const router = useRouter()
 
-interface FileContent {
-  content: string;
-}
+  const {
+    contents,
+    currentPath,
+    selectedFile,
+    fileContent,
+    loading,
+    error,
+    setCurrentPath,
+    setSelectedFile,
+    fetchFileContent,
+  } = useGitHubData(username!, repo!)
 
-const RepoPage = () => {
-  const params = useParams();
-const username = Array.isArray(params?.username) ? params?.username[0] : params?.username;
-const repo = Array.isArray(params?.repo) ? params?.repo[0] : params?.repo;
-  
-  const [contents, setContents] = useState<RepoContent[]>([]);
-  const [currentPath, setCurrentPath] = useState('');
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [buttonLoading, setButtonLoading] = useState(false)
 
-  useEffect(() => {
-    if (username && repo) {
-      fetchRepoContents(currentPath);
-    }
-  }, [username, repo, currentPath]);
-
-  const fetchRepoContents = async (path: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      if (!username || !repo) {
-        throw new Error('Username or repository is missing');
-      }
-  
-      const token = process.env.NEXT_PUBLIC_GITHUB_TOKEN;
-      const response = await fetch(`https://api.github.com/repos/${username}/${repo}/contents/${path}`, {
-        headers: {
-          Authorization: `token ${token}`,
-        },
-      });
-  
-      if (!response.ok) {
-        throw new Error('Failed to fetch repository contents');
-      }
-      const data: RepoContent[] = await response.json();
-      setContents(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unknown error occurred');
-    } finally {
-      setLoading(false);
-    }
-  };
-  
-
-  const fetchFileContent = async (path: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const token = process.env.NEXT_PUBLIC_GITHUB_TOKEN;
-      const response = await fetch(`https://api.github.com/repos/${username}/${repo}/contents/${path}`, {
-        headers: {
-          Authorization: `token ${token}`,
-        },
-      });
-      if (!response.ok) {
-        throw new Error('Failed to fetch file content');
-      }
-      const data: FileContent = await response.json();
-      setFileContent(atob(data.content)); // Decode base64 content
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unknown error occurred');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleItemClick = (item: RepoContent) => {
+  const handleItemClick = (item: { type: string; path: string }) => {
     if (item.type === 'dir') {
-      setCurrentPath(item.path);
+      setCurrentPath(item.path)
     } else if (item.type === 'file') {
-      setSelectedFile(item.path);
-      fetchFileContent(item.path);
+      setSelectedFile(item.path)
+      fetchFileContent(item.path)
     }
-  };
-  
+  }
+
   const handleBackClick = () => {
-    const newPath = currentPath.split('/').slice(0, -1).join('/');
-    setCurrentPath(newPath);
-  };
+    const newPath = currentPath.split('/').slice(0, -1).join('/')
+    setCurrentPath(newPath)
+  }
 
   const handleTalkToCode = async () => {
-    console.log('Current values:', { username, repo });
-  
     try {
-      setLoading(true);
-      setError(null);
+      setButtonLoading(true)
       const response = await fetch('/api/parse-repo', {
         method: 'POST',
         headers: {
@@ -113,73 +54,115 @@ const repo = Array.isArray(params?.repo) ? params?.repo[0] : params?.repo;
           username,
           repo
         }),
-      });
+      })
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to process repository');
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to process repository')
       }
-      const data = await response.json();
-      alert(data.message || 'Successfully processed repository!');
+      const data = await response.json()
+      alert(data.message || 'Successfully processed repository!')
+      router.push(`/pages/chat/${username}/${repo}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unknown error occurred');
+      console.error(err)
+      alert(err instanceof Error ? err.message : 'An unknown error occurred')
     } finally {
-      setLoading(false);
+      setButtonLoading(false)
     }
-  };
-  
+  }
 
-  if (loading) return <div className="text-center mt-8">Loading...</div>;
-  if (error) return <div className="text-center mt-8 text-red-500">Error: {error}</div>;
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-[#e0d4cc] outline-black outline">
+        <Card className="w-[350px] outline-black outline">
+          <CardHeader>
+            <CardTitle className="text-destructive">Error</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-destructive">{error}</p>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
 
   return (
-    <div className="container min-h-screen mx-auto p-4 flex flex-col justify-between mt-24">
-      <div>
-        <h1 className="text-2xl font-bold mb-4">Contents of {repo}</h1>
-        <div className="flex">
-          <div className="w-1/3 pr-4">
-            {currentPath && (
-              <button
-                onClick={handleBackClick}
-                className="mb-2 px-2 py-1 bg-gray-200 rounded hover:bg-gray-300"
-              >
-                Back
-              </button>
-            )}
-            <ul className="border rounded">
-              {contents.map((item) => (
-                <li
-                  key={item.sha}
-                  className="p-2 hover:bg-gray-100 cursor-pointer flex items-center"
-                  onClick={() => handleItemClick(item)}
-                >
-                  {item.type === 'dir' ? <FaFolder className="mr-2" /> : <FaFile className="mr-2" />}
-                  {item.name}
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="w-2/3 pl-4">
-            {selectedFile && fileContent && (
-              <div>
-                <h2 className="text-xl font-semibold mb-2">{selectedFile}</h2>
-                <pre className="bg-gray-100 p-4 rounded overflow-auto max-h-96">
-                  {fileContent}
-                </pre>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="mb-64 mt-8">
+    <div className="container mx-auto p-4 space-y-6 mt-8 bg-[#e0d4cc] outline-black outline">
+      <div className="flex items-center justify-between">
+        <h1 className="text-3xl font-bold text-primary flex items-center">
+          <GithubIcon className="mr-2 h-8 w-8" />
+          {repo}
+        </h1>
         <Button
           onClick={handleTalkToCode}
-          className="px-4 py-2 bg-blue-400 text-black rounded hover:bg-blue-500"
+          disabled={buttonLoading}
+         
         >
-          Talk to Code
+          <span> {buttonLoading && <Loader2Icon className="mr-2 h-4 w-4 animate-spin" />}
+          Talk to Code</span>
         </Button>
       </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <Card className="lg:col-span-1 outline-black outline">
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              File Explorer
+              {currentPath && (
+                <Button size="icon" onClick={handleBackClick} aria-label="Go back"  className="bg-primary text-primary-foreground hover:bg-primary/90 outline-black ">
+                  <ArrowLeftIcon className="h-4 w-4 ml-[-8px] mt-[-1px]" />
+                </Button>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <div className="flex justify-center items-center h-[50vh]">
+                <Loader2Icon className="h-6 w-6 animate-spin text-primary" />
+              </div>
+            ) : (
+              <ScrollArea className="h-[calc(100vh-300px)] outline-black outline">
+                <ul className="space-y-1">
+                  {contents.map((item) => (
+                    <li key={item.sha}>
+                      <Button
+                        variant="ghost"
+                        className="w-full justify-start hover:bg-accent hover:text-accent-foreground outline-black outline"
+                        onClick={() => handleItemClick(item)}
+                      >
+                        <span className="flex items-center">
+                          {item.type === 'dir' ? (
+                            <FolderIcon className="mr-2 h-4 w-4 flex-shrink-0 text-primary" />
+                          ) : (
+                            <FileIcon className="mr-2 h-4 w-4 flex-shrink-0 text-secondary" />
+                          )}
+                          <span className="truncate">{item.name}</span>
+                        </span>
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </ScrollArea>
+            )}
+          </CardContent>
+        </Card>
+        <Card className="lg:col-span-2 outline-black outline">
+          <CardHeader>
+            <CardTitle>{selectedFile || 'File Content'}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {selectedFile && fileContent ? (
+              <ScrollArea className="h-[calc(100vh-300px)] outline-black outline">
+                <pre className="p-4 bg-muted rounded-md overflow-x-auto ">
+                  <code>{fileContent}</code>
+                </pre>
+              </ScrollArea>
+            ) : (
+              <div className="flex items-center justify-center h-[calc(100vh-300px)] text-muted-foreground">
+                <p>Select a file to view its content</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
-  );
-};
-
-export default RepoPage;
+  )
+}
